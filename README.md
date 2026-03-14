@@ -77,7 +77,13 @@ python main.py --platforms xiaohongshu
 
 ### 京东 (JD.com)
 
-通过关键词搜索商品，再拉取商品评价。无需登录，可直接使用。
+通过关键词搜索商品，再拉取商品评价。京东评价接口在未登录状态下可能返回空数据，
+建议提供 Cookie 以保证正常抓取：
+
+```bash
+export JD_COOKIE="<your cookie string here>"
+python main.py --platforms jd
+```
 
 ### Bilibili
 
