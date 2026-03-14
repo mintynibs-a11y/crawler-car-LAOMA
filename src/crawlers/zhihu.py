@@ -7,9 +7,14 @@ questions and articles related to car exterior design.
 Search API:  https://www.zhihu.com/api/v4/search_v3
 Answer API:  https://www.zhihu.com/api/v4/questions/{qid}/answers
 Comment API: https://www.zhihu.com/api/v4/answers/{aid}/comments
+
+Set the ``ZHIHU_COOKIE`` environment variable to a valid Zhihu session cookie
+string (including ``d_c0`` and ``z_c0`` cookies) to authenticate API requests
+and avoid 400/403 rejections.
 """
 
 import logging
+import os
 from typing import List
 
 from ..models import Comment
@@ -27,14 +32,18 @@ class ZhihuCrawler(BaseCrawler):
 
     PLATFORM = "知乎"
 
-    def __init__(self, **kwargs):
+    def __init__(self, cookie: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        self.session.headers.update(
-            {
-                "Referer": "https://www.zhihu.com/",
-                "x-requested-with": "fetch",
-            }
-        )
+        cookie = cookie or os.getenv("ZHIHU_COOKIE", "")
+        headers: dict = {
+            "Referer": "https://www.zhihu.com/",
+            "x-requested-with": "fetch",
+            # Tells Zhihu which API signature version we are using.
+            "x-zse-93": "101_3_3.0",
+        }
+        if cookie:
+            headers["Cookie"] = cookie
+        self.session.headers.update(headers)
 
     def _crawl(self, keyword: str) -> List[Comment]:
         comments: List[Comment] = []
