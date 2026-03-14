@@ -3,9 +3,14 @@
 
 Targets the public comment API used by JD's own website.
 Endpoint: https://club.jd.com/comment/productPageComments.action
+
+Required env var (optional but strongly recommended):
+    JD_COOKIE  – the full Cookie header value from a logged-in browser session.
+                 Without a valid cookie the comment API may return empty responses.
 """
 
 import logging
+import os
 from typing import List
 from urllib.parse import quote
 
@@ -31,6 +36,23 @@ class JDCrawler(BaseCrawler):
     """Crawl user reviews from JD.com for car exterior products."""
 
     PLATFORM = "京东"
+
+    def __init__(self, cookie: str | None = None, **kwargs):
+        super().__init__(**kwargs)
+        cookie = cookie or os.getenv("JD_COOKIE", "")
+        if not cookie:
+            logger.warning(
+                "[JD] JD_COOKIE not set – the comment API will return empty responses. "
+                "Set the JD_COOKIE environment variable with a valid cookie from a "
+                "logged-in browser session."
+            )
+        headers: dict = {
+            "Referer": "https://www.jd.com/",
+            "Origin": "https://www.jd.com",
+        }
+        if cookie:
+            headers["Cookie"] = cookie
+        self.session.headers.update(headers)
 
     def _crawl(self, keyword: str) -> List[Comment]:
         comments: List[Comment] = []
@@ -77,6 +99,8 @@ class JDCrawler(BaseCrawler):
     def _fetch_reviews(self, sku: str, keyword: str) -> List[Comment]:
         """Fetch up to 3 pages of reviews for a single SKU."""
         comments: List[Comment] = []
+        # Set product-specific Referer so the comment API accepts the request.
+        self.session.headers.update({"Referer": f"https://item.jd.com/{sku}.html"})
         for page in range(0, 3):
             try:
                 params = {
@@ -89,6 +113,13 @@ class JDCrawler(BaseCrawler):
                     "fold": 1,
                 }
                 resp = self._get(_COMMENT_API, params=params)
+                if not resp.text.strip():
+                    logger.warning(
+                        "[JD] Page %d for SKU %s returned empty response – "
+                        "a valid JD_COOKIE is required.",
+                        page, sku,
+                    )
+                    break
                 data = resp.json()
                 items = data.get("comments", [])
                 if not items:

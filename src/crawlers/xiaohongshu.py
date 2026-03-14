@@ -51,6 +51,12 @@ class XiaohongshuCrawler(BaseCrawler):
     def __init__(self, cookie: str | None = None, **kwargs):
         super().__init__(**kwargs)
         cookie = cookie or os.getenv("XHS_COOKIE", "")
+        if not cookie:
+            logger.warning(
+                "[XHS] XHS_COOKIE not set – API calls will return no data. "
+                "Set the XHS_COOKIE environment variable with a valid cookie "
+                "from a logged-in browser session on xiaohongshu.com."
+            )
         self.session.headers.update(
             {
                 "Referer": "https://www.xiaohongshu.com/",
@@ -86,6 +92,16 @@ class XiaohongshuCrawler(BaseCrawler):
             self.session.headers.update(sign)
             resp = self._post(_SEARCH_API, json=payload)
             data = resp.json()
+            # Log API-level errors (e.g. auth failures) to help with diagnosis.
+            if not data.get("success", True) or data.get("code", 0) != 0:
+                logger.warning(
+                    "[XHS] Search API returned error for '%s': code=%s msg=%s – "
+                    "check that XHS_COOKIE is valid.",
+                    keyword,
+                    data.get("code"),
+                    data.get("msg", data.get("message", "")),
+                )
+                return results
             items = data.get("data", {}).get("items", [])
             for item in items:
                 note = item.get("note_card", item)
@@ -114,6 +130,15 @@ class XiaohongshuCrawler(BaseCrawler):
                 self.session.headers.update(sign)
                 resp = self._get(_COMMENT_API, params=params)
                 data = resp.json()
+                # Log API-level errors to assist diagnosis.
+                if not data.get("success", True) or data.get("code", 0) != 0:
+                    logger.warning(
+                        "[XHS] Comment API error for note %s: code=%s msg=%s",
+                        note_id,
+                        data.get("code"),
+                        data.get("msg", data.get("message", "")),
+                    )
+                    break
                 comment_list = data.get("data", {}).get("comments", [])
                 if not comment_list:
                     break
