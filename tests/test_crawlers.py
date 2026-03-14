@@ -32,8 +32,21 @@ def _mock_response(json_data: dict, status_code: int = 200) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 class TestBilibiliCrawler:
+    # Minimal nav response that provides valid WBI img/sub keys.
+    _NAV_RESP = _mock_response(
+        {
+            "data": {
+                "wbi_img": {
+                    "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077d.png",
+                    "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
+                }
+            }
+        }
+    )
+
     def test_crawl_returns_crawl_result(self):
         crawler = BilibiliCrawler(max_pages=1)
+        nav_resp = self._NAV_RESP
         search_resp = _mock_response(
             {
                 "data": {
@@ -60,7 +73,7 @@ class TestBilibiliCrawler:
             }
         )
 
-        with patch.object(crawler.session, "get", side_effect=[search_resp, comment_resp, _mock_response({"data": {"replies": []}})]):
+        with patch.object(crawler.session, "get", side_effect=[nav_resp, search_resp, comment_resp, _mock_response({"data": {"replies": []}})]):
             result = crawler.crawl("汽车外饰")
 
         assert isinstance(result, CrawlResult)
@@ -85,6 +98,30 @@ class TestBilibiliCrawler:
             result = crawler.crawl("汽车外饰")
         assert result.success is True
         assert result.total == 0
+
+    def test_sign_wbi_produces_deterministic_signature(self):
+        crawler = BilibiliCrawler(max_pages=1)
+        # Pre-inject a known mixin key so we don't need a live nav call.
+        crawler._wbi_mixin_key = "abcdefghijklmnopqrstuvwxyz012345"
+        with patch("src.crawlers.bilibili.time") as mock_time:
+            mock_time.time.return_value = 1700000000
+            signed = crawler._sign_wbi({"keyword": "汽车外饰", "search_type": "video"})
+        assert "w_rid" in signed
+        assert "wts" in signed
+        assert signed["wts"] == 1700000000
+        # The same inputs must always produce the same signature.
+        with patch("src.crawlers.bilibili.time") as mock_time:
+            mock_time.time.return_value = 1700000000
+            signed2 = crawler._sign_wbi({"keyword": "汽车外饰", "search_type": "video"})
+        assert signed["w_rid"] == signed2["w_rid"]
+
+    def test_sign_wbi_falls_back_when_no_mixin_key(self):
+        crawler = BilibiliCrawler(max_pages=1)
+        crawler._wbi_mixin_key = ""  # empty key → no signing
+        params = {"keyword": "汽车外饰"}
+        signed = crawler._sign_wbi(params)
+        assert "w_rid" not in signed
+        assert "wts" not in signed
 
 
 # ---------------------------------------------------------------------------

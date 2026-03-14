@@ -3,23 +3,38 @@ Bilibili comment crawler.
 
 Uses Bilibili's public API to fetch video comments about car exterior design.
 
-Search API:  https://api.bilibili.com/x/web-interface/search/type
+Search API:  https://api.bilibili.com/x/web-interface/wbi/search/type  (WBI-signed)
 Comment API: https://api.bilibili.com/x/v2/reply/main
+Nav API:     https://api.bilibili.com/x/web-interface/nav  (WBI key source)
+
+Bilibili requires WBI (Web Baseline Interface) request signing for the search
+API since 2023.  Set the ``BILI_COOKIE`` environment variable to a valid
+Bilibili session cookie string to authenticate comment fetching.
 """
 
+import hashlib
 import logging
+import os
+import time
 from typing import List
+from urllib.parse import urlencode
 
 from ..models import Comment
 from .base import BaseCrawler
 
 logger = logging.getLogger(__name__)
 
-_SEARCH_API = "https://api.bilibili.com/x/web-interface/search/type"
+_NAV_API = "https://api.bilibili.com/x/web-interface/nav"
+_SEARCH_API = "https://api.bilibili.com/x/web-interface/wbi/search/type"
 _COMMENT_API = "https://api.bilibili.com/x/v2/reply/main"
 
-# wbi-signed search is required for newer endpoints; fall back to legacy.
-_SEARCH_LEGACY = "https://api.bilibili.com/x/web-interface/search/type"
+# Bilibili WBI key-shuffling table (reverse-engineered, stable across versions).
+_MIXIN_KEY_ENC_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+    27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+    37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+    22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
+]
 
 
 class BilibiliCrawler(BaseCrawler):
@@ -27,14 +42,55 @@ class BilibiliCrawler(BaseCrawler):
 
     PLATFORM = "bilibili"
 
-    def __init__(self, **kwargs):
+    def __init__(self, cookie: str | None = None, **kwargs):
         super().__init__(**kwargs)
-        self.session.headers.update(
-            {
-                "Referer": "https://www.bilibili.com/",
-                "Origin": "https://www.bilibili.com",
-            }
-        )
+        cookie = cookie or os.getenv("BILI_COOKIE", "")
+        headers: dict = {
+            "Referer": "https://www.bilibili.com/",
+            "Origin": "https://www.bilibili.com",
+        }
+        if cookie:
+            headers["Cookie"] = cookie
+        self.session.headers.update(headers)
+        self._wbi_mixin_key: str | None = None
+
+    # ------------------------------------------------------------------
+    # WBI signing helpers
+    # ------------------------------------------------------------------
+
+    def _get_mixin_key(self) -> str:
+        """Fetch and cache the WBI mixin key from Bilibili's nav API."""
+        if self._wbi_mixin_key is not None:
+            return self._wbi_mixin_key
+        try:
+            resp = self.session.get(_NAV_API, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            img_url: str = data["data"]["wbi_img"]["img_url"]
+            sub_url: str = data["data"]["wbi_img"]["sub_url"]
+            img_key = img_url.rsplit("/", 1)[-1].split(".")[0]
+            sub_key = sub_url.rsplit("/", 1)[-1].split(".")[0]
+            merged = img_key + sub_key
+            mixin_key = "".join(merged[i] for i in _MIXIN_KEY_ENC_TAB if i < len(merged))[:32]
+            self._wbi_mixin_key = mixin_key
+        except Exception as exc:
+            logger.warning("[Bilibili] Failed to fetch WBI mixin key: %s", exc)
+            self._wbi_mixin_key = ""
+        return self._wbi_mixin_key
+
+    def _sign_wbi(self, params: dict) -> dict:
+        """Return *params* augmented with WBI signature fields (``wts`` + ``w_rid``)."""
+        mixin_key = self._get_mixin_key()
+        if not mixin_key:
+            return params
+        signed = dict(params)
+        signed["wts"] = int(time.time())
+        # Sort and URL-encode, then strip characters that Bilibili's validator rejects.
+        query = urlencode(sorted(signed.items()))
+        for ch in "!'()*":
+            query = query.replace(ch, "")
+        signed["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
+        return signed
 
     def _crawl(self, keyword: str) -> List[Comment]:
         comments: List[Comment] = []
@@ -50,12 +106,14 @@ class BilibiliCrawler(BaseCrawler):
         """Return list of (aid, title, url) tuples from a keyword search."""
         results = []
         try:
-            params = {
-                "search_type": "video",
-                "keyword": keyword,
-                "page": 1,
-                "page_size": 10,
-            }
+            params = self._sign_wbi(
+                {
+                    "search_type": "video",
+                    "keyword": keyword,
+                    "page": 1,
+                    "page_size": 10,
+                }
+            )
             resp = self._get(_SEARCH_API, params=params)
             data = resp.json()
             items = data.get("data", {}).get("result", [])
